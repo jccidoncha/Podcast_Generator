@@ -29,7 +29,7 @@ A typical Next.js full-stack app **plus** a long-lived Node worker. They share a
 | Scheduling | `node-cron` (1-min tick) + per-user schedule in DB | The cron tick is just a poller for "which users are due now in their TZ?" — one cheap DB query. No per-user cron registrations to manage at runtime.                                                                                                                                                                  |
 
 
-### System overview
+### System overview — components by layer
 
 Colors highlight the layer each component belongs to. Supabase is explicitly the only stateful service we own — everything stateless can be redeployed at will.
 
@@ -94,6 +94,62 @@ flowchart TB
   class Data,DB,FS data;
   class Ext,OpenAI,Eleven,Jina,News external;
 ```
+
+### Request flow — how a job moves through the queue
+
+The diagram above lists **what exists**. This one shows **how it flows**: a typical request — manual or scheduled — drops a `Run(PENDING)` row, the worker claims it, the pipeline runs, status updates back to the DB. The same row is the queue, the state machine, AND the source of truth — no Redis, no broker, no messaging tier.
+
+```mermaid
+flowchart TB
+  User(["👤 user"]) <-->|HTTPS| Frontend
+
+  subgraph App["Next.js · single deploy"]
+    direction TB
+    Frontend["🌐 Frontend<br/>RSC pages · GenerationToast (5s poll)"]
+    Frontend <-->|fetch JSON| Backend
+    Backend["⚙️ Backend<br/>Route Handlers"]
+    Backend <-->|check schedules| Scheduler
+    Scheduler["⏰ node-cron · 1m tick<br/>processScheduledUsers"]
+  end
+
+  Backend -->|enqueue Run.PENDING| Queue
+  Scheduler -->|enqueue Run.PENDING| Queue
+
+  subgraph QueueBox["📬 Postgres-as-queue · no Redis"]
+    Queue[("Run.status = PENDING")]
+  end
+
+  Queue -->|claim oldest · 5s poll| WorkerProc
+
+  subgraph WorkerBox["🛠️ Worker process · long-lived Node"]
+    direction TB
+    WorkerProc["process-pending<br/>+ janitor + pipeline runner"]
+  end
+
+  WorkerProc -.->|status → RUNNING| DB
+  WorkerProc -.->|status → SUCCEEDED<br/>+ Episode + Sources| DB
+  WorkerProc -->|write mp3| FS
+
+  Backend <-->|Prisma 6| DB
+
+  DB[("🗄️ Supabase · Postgres")]
+  FS[/"📂 public/audio/X.mp3"/]
+
+  FS -.->|served at /audio/X.mp3| Frontend
+
+  classDef frontend fill:#dbeafe,stroke:#1e40af,color:#1e3a8a;
+  classDef backend  fill:#dcfce7,stroke:#15803d,color:#14532d;
+  classDef queue    fill:#fed7aa,stroke:#c2410c,color:#7c2d12;
+  classDef worker   fill:#e9d5ff,stroke:#7e22ce,color:#581c87;
+  classDef data     fill:#fef3c7,stroke:#a16207,color:#713f12;
+  class App,Frontend frontend;
+  class Backend,Scheduler backend;
+  class QueueBox,Queue queue;
+  class WorkerBox,WorkerProc worker;
+  class DB,FS data;
+```
+
+Migrating to BullMQ + Redis later would only touch the **Queue box** and the **WorkerProc's poll loop** — the Next.js app and the pipeline don't change.
 
 
 
@@ -205,7 +261,40 @@ flowchart LR
   P --> Done([Episode visible<br/>in /episodes])
 ```
 
+### Pipeline at a glance — stages + providers
 
+Same six stages, drawn as a clean linear chain with the provider each one calls — plus a stage-by-stage cheat sheet underneath. Use this when you want the high-level view; use the diagram above when you want the internal steps of each stage.
+
+```mermaid
+flowchart LR
+  Start([Run<br/>PENDING]) --> C[1 · Collect]
+  C --> R[2 · Rank]
+  R --> E[3 · Enrich]
+  E --> S[4 · Script]
+  S --> T[5 · Synthesize]
+  T --> P[6 · Stitch + Persist]
+  P --> Done([Episode<br/>SUCCEEDED])
+
+  C -. uses .-> N(("📰 RSS<br/>+ Google News"))
+  R -. uses .-> Emb(("🤖 OpenAI<br/>embeddings"))
+  E -. uses .-> J(("📄 Jina Reader"))
+  S -. uses .-> O(("🤖 OpenAI<br/>gpt-4o"))
+  T -. uses .-> EL(("🔊 ElevenLabs"))
+
+  classDef stage fill:#dcfce7,stroke:#15803d,color:#14532d;
+  classDef provider fill:#fae8ff,stroke:#a21caf,color:#701a75;
+  class C,R,E,S,T,P stage;
+  class N,Emb,J,O,EL provider;
+```
+
+| Stage             | What it does                                                                                                              | Notes                                                                                            |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| **1 · Collect**   | Broad shortlist of fresh news: ~8 reliable RSS feeds + a Google News RSS query per user interest.                          | Google News URLs are wrappers — a custom decoder resolves them to the real outlet URL so Jina can enrich. |
+| **2 · Rank**      | Embed interests + articles (`text-embedding-3-small`), score with **MMR λ=0.7** for relevance × diversity, apply focus-topic hard filter (≥0.30 cosine), dedup against 7-day history. | When a focus is set we never pad with off-topic articles — better a tight 3-segment episode than 6 mixed. |
+| **3 · Enrich**    | Fetch full article body via **Jina Reader** (`r.jina.ai`, free, no key) for the top-N ranked articles.                     | Without this, the script can only paraphrase snippets → low groundedness scores.                  |
+| **4 · Script**    | gpt-4o with `response_format: json_schema`. Per-section: intro + N segments (parallel) → outro (after, with real segment summary). Length-aware `OVERSHOOT` (1.15 → 1.35) + structured expand-retries. | Named-entity rule + post-processing safety nets (strip placeholders, greetings, speaker labels). |
+| **5 · Synthesize** | ElevenLabs `eleven_multilingual_v2`. `synthesizeMany` runs TTS for each chunk (intro + each segment + outro) in parallel. All chunks request `mp3_44100_128`. | CBR same-format chunks → safe to byte-concat without re-encode.                                  |
+| **6 · Stitch + Persist** | `Buffer.concat()` of the CBR mp3 frames → `public/audio/<runId>.mp3`. One Prisma transaction: insert `Episode` + `Source[]` + flip `Run.SUCCEEDED`. | No ffmpeg dependency. Idempotent on `runId` — retrying a stage that already persisted is a no-op. |
 
 > Diagrams use Mermaid — they render natively in GitHub, GitLab, VS Code preview, Obsidian, Notion, and most modern markdown viewers.
 

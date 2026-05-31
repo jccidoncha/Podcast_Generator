@@ -29,12 +29,15 @@ Fill in `.env`:
 
 `.env.example` documents every variable inline. See **solution.md → "Stack & why" → Database row** for why those pooler params matter.
 
-### 3. Migrate the database
+### 3. Migrate + seed the database
 ```bash
-pnpm exec prisma migrate dev
+pnpm exec prisma migrate dev    # creates all tables in your Supabase
+pnpm db:seed                    # creates the demo user, default config, 2 starter interests
 ```
 
-This creates all tables (users, interests, configs, runs, episodes, sources) and generates the Prisma client.
+`migrate dev` creates the tables (users, interests, configs, runs, episodes, sources) and generates the Prisma client. `db:seed` is **idempotent** — `upsert` based, safe to re-run; it preserves interests you've already edited.
+
+Without the seed step you'd get a 404 from `/api/config` and a foreign-key error from `POST /api/runs` because the hard-coded `demo-user` row wouldn't exist yet.
 
 ### 4. Run the two processes
 In separate terminals:
@@ -59,6 +62,7 @@ Open `http://localhost:3000`. First visit redirects to **/onboarding** — descr
 | `pnpm test`                      | Unit tests (Vitest, mocked providers — no real API calls).                                                     |
 | `pnpm eval`                      | Quality eval suite (Layer A deterministic + Layer B groundedness + Layer C LLM-as-judge). See solution.md §Quality. |
 | `pnpm exec prisma migrate dev`   | Apply schema changes in dev.                                                                                   |
+| `pnpm db:seed`                   | Idempotent seed — creates demo user + default config + starter interests. Run once after migrating a fresh DB. |
 | `pnpm exec prisma studio`        | Browse the DB.                                                                                                 |
 
 ---
