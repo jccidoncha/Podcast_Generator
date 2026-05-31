@@ -1,0 +1,152 @@
+// Prisma schema for Personal Podcast Generator.
+// Provider: Postgres via Supabase (see CLAUDE.md §2.5).
+// Run `pnpm exec prisma migrate dev` once DATABASE_URL is set in .env.local.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // Supabase pattern: app uses the transaction-mode pooler (pgbouncer, IPv4),
+  // migrations use the session-mode pooler via directUrl.
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  createdAt DateTime @default(now())
+
+  interests Interest[]
+  config    PodcastConfig?
+  runs      Run[]
+}
+
+model Interest {
+  id        String  @id @default(cuid())
+  userId    String
+  topic     String
+  weight    Float   @default(1.0)
+  // LLM-generated 1-sentence description ("Shaboozey: American country/hip-hop
+  // artist"). Lets the script prompt frame topics correctly instead of
+  // treating proper nouns as generic concepts.
+  context   String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model PodcastConfig {
+  userId          String   @id
+  voice           String
+  secondaryVoice  String?  // only used when format != SOLO
+  targetLengthMin Int      @default(8)
+  tone            Tone     @default(CONVERSATIONAL)
+  cadenceCron     String   @default("0 8 * * *") // deprecated — superseded by schedule* fields below
+  style           Style    @default(NEWS_ROUNDUP)
+  density         Density  @default(DETAILED)
+  language        Language @default(EN)
+  format          Format   @default(SOLO)
+
+  // Per-user schedule. The worker's cron ticks every WORKER_CRON interval
+  // (e.g. */15) and checks which users have a slot due now in their TZ. If
+  // due AND lastScheduledRunAt is from a different local day, fire a
+  // PENDING run (the existing on-demand poller picks it up and runs the
+  // pipeline). This way one PodcastConfig row drives both manual generates
+  // and the daily schedule.
+  scheduleEnabled    Boolean   @default(false)
+  scheduleHour       Int       @default(8)        // 0-23 in user TZ
+  scheduleMinute     Int       @default(0)        // 0-59
+  scheduleDays       Int[]     @default([1,2,3,4,5]) // 0=Sun..6=Sat; default Mon-Fri
+  scheduleTimezone   String    @default("UTC")    // IANA tz name
+  lastScheduledRunAt DateTime?                    // de-dupe: don't fire twice in one local day
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Run {
+  id           String    @id @default(cuid())
+  userId       String
+  status       RunStatus @default(PENDING)
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  errorMessage String?
+  focusTopic   String? // when set, biases ranking + script toward this theme
+  // Per-episode overrides: take precedence over the user's saved PodcastConfig
+  // for THIS run only. Lets the UI offer "format/length/style for this one
+  // episode" without forcing a trip to Settings.
+  overrideTargetLengthMin Int?
+  overrideFormat          Format?
+  overrideStyle           Style?
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  episode Episode?
+
+  @@index([userId, status])
+}
+
+model Episode {
+  id            String   @id @default(cuid())
+  runId         String   @unique
+  audioUrl      String
+  durationMs    Int
+  costCents     Int      @default(0)
+  evalScoreJson Json?
+  scriptJson    Json? // full script with per-line timings + speaker names (for transcript UI)
+  createdAt     DateTime @default(now())
+
+  run     Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  sources Source[]
+}
+
+model Source {
+  id          String    @id @default(cuid())
+  episodeId   String
+  url         String
+  title       String
+  publishedAt DateTime?
+  snippet     String?
+
+  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+
+  @@index([episodeId])
+}
+
+enum RunStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum Tone {
+  CONVERSATIONAL
+  FORMAL
+  ENERGETIC
+}
+
+enum Style {
+  NEWS_ROUNDUP
+  DEEP_DIVE
+  MAGAZINE
+}
+
+enum Density {
+  HEADLINE
+  DETAILED
+}
+
+enum Language {
+  EN
+  ES
+}
+
+enum Format {
+  SOLO
+  CO_HOST
+  DEBATE
+  INTERVIEW
+}

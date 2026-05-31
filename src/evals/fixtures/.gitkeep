@@ -1,0 +1,3 @@
+# Golden fixtures live here. Each fixture is a frozen input set (interests +
+# articles) the eval harness runs against. Refresh periodically so they stay
+# representative of live behavior (CLAUDE.md §9.3 "fixtures drift").
