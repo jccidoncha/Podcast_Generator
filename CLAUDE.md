@@ -109,7 +109,9 @@ Each entry: **Decision → why → tradeoff → revisit when**.
 - **Why:** local keeps dev frictionless; object storage is durable and CDN-able
   in prod.
 - **Tradeoff:** local doesn't persist across instances or deploys, so the prod
-  path must be exercised early to avoid surprises.
+  path must be exercised early to avoid surprises. The `StorageProvider`
+  abstraction (`/src/providers/storage.ts`) already isolates the swap —
+  `LocalStorage` wired, `S3Storage` is a stub.
 - **Revisit when:** you need signed URLs, CDN delivery, or lifecycle/retention
   policies for old episodes.
 

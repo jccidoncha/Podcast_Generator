@@ -98,6 +98,6 @@ A full architectural walkthrough (system diagram, sequence diagram, pipeline det
 
 ## What's intentionally out of scope (MVP)
 
-Auth (single hard-coded `demo-user`), S3 audio storage (local FS in dev), real listen-through / download tracking (mocked on the dashboard with a `MOCK` badge), BullMQ + Redis (Postgres-as-queue is sufficient), multi-worker horizontal scaling.
+Auth (single hard-coded `demo-user`), S3 audio storage (local FS in dev — the `StorageProvider` abstraction is in place for the swap), real listen-through / download tracking (mocked on the dashboard with a `MOCK` badge), BullMQ + Redis (Postgres-as-queue is sufficient), multi-worker horizontal scaling.
 
 The rationale for each — and what the upgrade path looks like — is in **solution.md → "What's intentionally out of scope"**.
